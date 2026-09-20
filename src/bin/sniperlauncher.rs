@@ -55,8 +55,11 @@ fn allowed_times(s: &str)-> Result<String, String> {
 
 fn get_user_input()-> String {
     let mut userinp: String= String::new();
-    stdin().read_line(& mut userinp).expect("Could not read user input");
-    trimnw(userinp.as_str()).to_string()
+    let n: usize= stdin().read_line(&mut userinp).expect("Could not read user input");
+    if n== 0 {
+        return "N".to_string(); // no terminal (e.g. EC2 cloud-init) so skip the prompt
+    }
+    trimnw(&userinp).to_string()
 }
 
 fn count_bytes(s: String)-> Result<String, String> {
@@ -86,22 +89,48 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
     if a.sl.is_some() || a.tp.is_some() {
         argstr.push_str(format!(" -s {} -p {}", a.sl.unwrap(), a.tp.unwrap()).as_str());
     }
-    if a.lst.is_some() {argstr.push_str(format!(" -f {}", a.lst.as_ref().unwrap().display()).as_str())};
     if a.lg {argstr.push_str(" -l")}; 
+    if a.lst.is_some() {
+        let pathstr: String= a.lst.as_ref().unwrap().to_string_lossy().into_owned();
+        let s3: PutObjectOutput= s3_Client::new(&config).put_object()
+                                       .bucket("tokens")
+                                       .key(&pathstr)
+                                       .body(ByteStream::from(pathstr.clone().into_bytes()))
+                                       .send().await?;
+        let expiry: String= s3.expiration.unwrap_or_else(|| "None".into());
+        argstr.push_str(format!(" -f copy.lst").as_str());
+        println!("Adding '{}' to S3...\n   Expiration date: {}", pathstr, expiry)                                                                
+    }
     // add '&' to things that aren't Option<T> since they don't have Copy. If you don't add &, it will compile BUT you won't be able to use it 
 
+    // let mut setup= String::new();
+    // if token_vec.first().is_some_and(|t| t.as_str() != "None") {
+    // setup.push_str("cat > /root/tokens.lst <<'EOF'\n");
+    // for token in token_vec {
+    //     setup.push_str(token);
+    //     setup.push('\n');
+    // }
+    // setup.push_str("EOF\n");
+    // argstr.push_str(" -f /root/tokens.lst");
+    // }
+
+    // for longer lists (more than ~400 entries) add the file to S3 and copy it to aws s3 using cp
 
     // git clone https://github.com/K-spec-ops/solana-tools.git\n\
     //                               cd solana-tools\n\
     //                               cd solana-tools\n\
+    let pathhead: Cow<'_, str>= a.lst.as_ref().and_then(|x| x.as_path().file_name())
+                                                .map(|x| x.to_string_lossy()).unwrap_or_else(|| "".into());
     let userdata: String= format!("#!/bin/bash\n\
                                    export HOME=/root\n\
                                    sudo dnf install git gcc -y\n\
+                                   aws s3 cp s3://tokens/{} /root/copy.lst
                                    curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y\n\
                                    . \"$HOME/.cargo/env\"\n\
                                    git clone https://github.com/K-spec-ops/solana-tools.git\n\
                                    cd solana-tools\n\
-                                   {}", argstr); // shutdown now
+                                   cargo install --path .\n\
+                                   {}", pathhead, argstr); // shutdown now
     let info: RunInstancesOutput= client.run_instances().image_id(imageid)
                           .max_count(1)
                           .min_count(1)
@@ -118,7 +147,7 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
                    match instance.state.as_ref().and_then(|x| x.code) {
                                                 Some(0)=> "pending",
                                                 Some(16)=> "running",
-                                                Some(32)=> "shutting-down",
+                                                Some(32)=> "shutting down",
                                                 Some(48)=> "terminated",
                                                 _=> "None"},
                    platform.images.as_deref().unwrap_or_default().first()
@@ -133,7 +162,7 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
 fn launcher(a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider using enum here...
     if a.ec {
         let ami: &str= "ami-0bd3fbcdc633a1b1a"; // Amazon Linux 2023 kernel-6.18 AMIA, until June 2029
-        let instance: InstanceType= InstanceType::T2Small;
+        let instance: InstanceType= InstanceType::T2Medium;
         create_instance(ami, instance, a).unwrap()
     } else {
         let log_path: PathBuf= if a.num>1 || !a.lg {
