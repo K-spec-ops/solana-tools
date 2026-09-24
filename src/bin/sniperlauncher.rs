@@ -3,6 +3,7 @@ use solana_tools::utils::*;
 
 // cargo install --path /home/kabir/Dropbox/sniper-trader, to get 'sniper-trader' to run anywhere by just doing 'sniper-trader'
 // cargo install --path /home/kabir/Dropbox/sniper-trader --force, IF you need to reinstall (new code, etc.)
+// Look at building with Github actions
 
 fn allowed_decimals(bound: f64)-> impl Fn(&str) -> Result<f64, String>+ Clone {
     move |s: &str| {
@@ -73,64 +74,97 @@ fn count_bytes(s: String)-> Result<String, String> {
     }
 }
 
+async fn add_policies(config: &SdkConfig, uuid: String)-> Result<String, Box<dyn Error>> {
+    let policy: &str= "{
+                \"Version\": \"2012-10-17\",
+                \"Statement\": [{
+                    \"Effect\": \"Allow\",
+                    \"Action\": \"{}:*\",
+                    \"Resource\": \"*\"}]}"; // not secure, but it this should only be ran on a personal account
+
+    let client: iam_Client= iam_Client::new(config);
+    let user: String= match client.get_user().send().await {
+        Ok(x)=> x.user.expect("Could not extract user info").user_name,
+        Err(_)=> panic!("IAM user object did not initialize (Are you using root credentials? / 
+                                                        Don't do that. Please create an IAM user for this script)")
+    };
+    println!("Your IAM user name is {}", user);
+
+    let s3_pol_obj: CreatePolicyOutput= client.create_policy()
+                          .policy_name(format!("{}{}", "s3_policy_", uuid))
+                          .policy_document(policy.replace("{}", "s3")).send().await?;
+    println!("Created an S3 policy with the name {}", s3_pol_obj.policy.expect("Could not extract S3 policy info")
+                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
+
+    let ec2_pol_obj: CreatePolicyOutput= client.create_policy()
+                          .policy_name(format!("{}{}", "ec2_policy_", uuid))
+                          .policy_document(policy.replace("{}", "ec2")).send().await?;
+    println!("Created an EC2 policy with the name {}", ec2_pol_obj.policy.expect("Could not extract EC2 policy info")
+                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
+
+    let iam_pol_obj: CreatePolicyOutput= client.create_policy()
+                          .policy_name(format!("{}{}", "iam_policy_", uuid))
+                          .policy_document(policy.replace("{}", "iam")).send().await?;
+    println!("Created an IAM policy with the name {}", iam_pol_obj.policy.expect("Could not extract IAM policy info")
+                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
+    
+    Ok(user)
+    
+}
+
 #[tokio::main]
 async fn create_instance(imageid: &str, instancetype: InstanceType, 
-                            a: &Args)-> Result<(), Box<dyn Error>> { // Use Box<...> when the function can return mutliple error types
+                            a: &Args, token_vec: &Vec<String>)-> Result<(), Box<dyn Error>> { // Use Box<...> when the function can return mutliple error types
     let placement: Placement= Placement::builder().availability_zone("us-east-1a").build();
     let config: SdkConfig= load_defaults(BehaviorVersion::latest()).await;
 
     match sts_Client::new(&config).get_caller_identity().send().await {
-        Ok(x)=> println!("AWS credentials successfully validated!\n   User ID: {}\n   Account ID: {}\n   ARN: {}", 
-                                    x.user_id.unwrap(), x.account.unwrap(), x.arn.unwrap()),
+        Ok(x)=> {println!("AWS credentials successfully validated!\n   User ID: {}\n   Account ID: {}\n   ARN: {}", 
+                                    x.user_id.as_ref().unwrap(), x.account.unwrap(), x.arn.as_ref().unwrap());
+                                    x.arn.unwrap()},
         Err(_)=> panic!("Could not validate AWS credentials. Please check that they are in your environment")
-    }
+    }; // println! consumes owned strings
+
+    add_policies(&config, Uuid::new_v4().to_string()).await?;
+
     let client: Client= Client::new(&config);
     let mut argstr: String= format!("sniper-trader -e {} -t {} -w {}", a.tot, a.time, a.num);
     if a.sl.is_some() || a.tp.is_some() {
-        argstr.push_str(format!(" -s {} -p {}", a.sl.unwrap(), a.tp.unwrap()).as_str());
+        let _= write!(&mut argstr, " -s {} -p {}", a.sl.unwrap(), a.tp.unwrap());
     }
     if a.lg {argstr.push_str(" -l")}; 
-    if a.lst.is_some() {
-        let pathstr: String= a.lst.as_ref().unwrap().to_string_lossy().into_owned();
-        let s3: PutObjectOutput= s3_Client::new(&config).put_object()
-                                       .bucket("tokens")
-                                       .key(&pathstr)
-                                       .body(ByteStream::from(pathstr.clone().into_bytes()))
+    
+    let mut s3_line_1= String::new();
+    let mut s3_line_2: String= String::new();
+    if !token_vec.is_empty() && token_vec.first().unwrap()!= "None" {
+        let s3: s3_Client= s3_Client::new(&config);
+        let pathstr: &str= "tokens.lst";
+        let bucket: String= format!("snipertrader-tokens-{}", Uuid::new_v4().to_string());
+        s3.create_bucket().bucket(&bucket).send().await?;
+        let putobj: PutObjectOutput= s3.put_object()
+                                       .bucket(&bucket)
+                                       .key(pathstr)
+                                       .body(ByteStream::from((token_vec.join("\n")+ "\n").into_bytes()))
                                        .send().await?;
-        let expiry: String= s3.expiration.unwrap_or_else(|| "None".into());
-        argstr.push_str(format!(" -f copy.lst").as_str());
-        println!("Adding '{}' to S3...\n   Expiration date: {}", pathstr, expiry)                                                                
-    }
+        let expiry: String= putobj.expiration.unwrap_or_else(|| "None".into());
+        println!("Adding '{}' to S3...\n   Expiration date: {}", pathstr, expiry);
+        argstr.push_str(" -f /root/copy.lst");
+        write!(&mut s3_line_1, "aws s3 cp s3://{}/{} /root/copy.lst\n", bucket, pathstr)?; 
+        write!(&mut s3_line_2, "aws s3 rb s3://{} --force\n", bucket)?;
+    } // use write! to change EXISTING mut strings that need formatting/aren't static, otherwise for EXISTING strings use push_str for performance
     // add '&' to things that aren't Option<T> since they don't have Copy. If you don't add &, it will compile BUT you won't be able to use it 
 
-    // let mut setup= String::new();
-    // if token_vec.first().is_some_and(|t| t.as_str() != "None") {
-    // setup.push_str("cat > /root/tokens.lst <<'EOF'\n");
-    // for token in token_vec {
-    //     setup.push_str(token);
-    //     setup.push('\n');
-    // }
-    // setup.push_str("EOF\n");
-    // argstr.push_str(" -f /root/tokens.lst");
-    // }
-
-    // for longer lists (more than ~400 entries) add the file to S3 and copy it to aws s3 using cp
-
-    // git clone https://github.com/K-spec-ops/solana-tools.git\n\
-    //                               cd solana-tools\n\
-    //                               cd solana-tools\n\
-    let pathhead: Cow<'_, str>= a.lst.as_ref().and_then(|x| x.as_path().file_name())
-                                                .map(|x| x.to_string_lossy()).unwrap_or_else(|| "".into());
     let userdata: String= format!("#!/bin/bash\n\
                                    export HOME=/root\n\
                                    sudo dnf install git gcc -y\n\
-                                   aws s3 cp s3://tokens/{} /root/copy.lst
+                                   {}\
                                    curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y\n\
                                    . \"$HOME/.cargo/env\"\n\
                                    git clone https://github.com/K-spec-ops/solana-tools.git\n\
                                    cd solana-tools\n\
                                    cargo install --path .\n\
-                                   {}", pathhead, argstr); // shutdown now
+                                   {}\n\
+                                   {}", s3_line_1, argstr, s3_line_2); // shutdown now
     let info: RunInstancesOutput= client.run_instances().image_id(imageid)
                           .max_count(1)
                           .min_count(1)
@@ -140,11 +174,17 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
                           .user_data(STANDARD.encode(userdata)).send().await?; // '?' here since the default aws errors are prob better than my own
 
     let instance: &Instance= info.instances.as_ref().expect("Could not extract instance details").first().expect("No instance returned");                      
+    let instanceid: &String= instance.instance_id.as_ref().unwrap_or_else(|| panic!("Could not extract instance id"));
     let platform: DescribeImagesOutput= client.describe_images().image_ids(imageid).send().await?;
+    client.wait_until_instance_running().instance_ids(instanceid)
+                                        .wait(Duration::from_mins(3)).await?; // remember, '?' automates error handling here
+    let current: DescribeInstancesOutput= client.describe_instances().instance_ids(instanceid).send().await?; 
     println!("AWS instance partitioned.\n   Reservation ID: {}\n   Architecture: {}\n   State: {}\n   Platform: {}\n   Instance Type: {}\n   Availability Zone: {} 
                 ", info.reservation_id.as_deref().unwrap_or_else(|| "None"), 
                    &instance.architecture.as_ref().map(|x| x.as_str()).unwrap_or_else(|| "None"),
-                   match instance.state.as_ref().and_then(|x| x.code) {
+                   match current.reservations.as_deref().unwrap_or_default().iter()
+                                             .flat_map(|x| x.instances.as_deref().unwrap_or_default())
+                                             .next().and_then(|x| x.state.as_ref()).and_then(|x| x.code) {
                                                 Some(0)=> "pending",
                                                 Some(16)=> "running",
                                                 Some(32)=> "shutting down",
@@ -162,15 +202,15 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
 fn launcher(a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider using enum here...
     if a.ec {
         let ami: &str= "ami-0bd3fbcdc633a1b1a"; // Amazon Linux 2023 kernel-6.18 AMIA, until June 2029
-        let instance: InstanceType= InstanceType::T2Medium;
-        create_instance(ami, instance, a).unwrap()
+        let instance: InstanceType= InstanceType::T3aMedium;
+        create_instance(ami, instance, a, token_vec).unwrap()
     } else {
         let log_path: PathBuf= if a.num>1 || !a.lg {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         } else {
             PathBuf::new()};
         let trade_path: PathBuf= env::current_dir().expect("Couldn't extract current dir path")
-                                                  .parent().unwrap().join("/bin/executetrades.rs");
+                                                  .parent().unwrap().join("subprocesses/executetrades.rs");
         println!("{:?}", trade_path);
         // let trade_path: PathBuf= env::current_exe()
         //                 .expect("Couldn't extract current .exe path")
@@ -203,7 +243,10 @@ fn launcher(a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider us
                         token address or compiling token addresses in a .lst file.\n\n\
                         To launch an EC2 instance, you need to add the 'AWS_ACCESS_KEY_ID' \
                         and 'AWS_SECRET_ACCESS_KEY' environment variables to your .bashrc file. Ctrl + Click \
-                        {} for more details. You also need to attach the 'AmazonEC2FullAccess' IAM policy.", 
+                        {} for more details.\n\nNOTE: The AWS SDKs are very large crates, and compilation can be killed by the OS \
+                        if there isn't enough memory (> than 8 GiB). If you have an older desktop or a laptop, it is recommended to \
+                        either compile on another machine, add more swap memory, or build the program \
+                        using an EC2 instance, create a \"target/release/\" directory in your cloned repo, then copy the binaries over to said directory.", 
                         "here".hyperlink("https://docs.aws.amazon.com/sdkref/latest/guide/environment-variables.html")),
           override_usage= "sniper-trader --stop <SL> --profit <TP> --time <TIME> --total <TOT> --file <LST> --workers <NUM> --log --cloud"
         )]
@@ -268,7 +311,7 @@ fn main() {
                         }
                     };
                 },
-                "N"=> break Arc::new(vec!["None".into()]),
+                "N"=> break Arc::new(Vec::new()),
                 _=> {
                     println!("I can't understand your input. Please try again.");
                     continue
@@ -295,14 +338,13 @@ fn main() {
                                                launcher(&args, &token_res_clone, tot_time)})}).collect();
                                                
     for h in handles {
-        let output:() = h.join().expect("Worker thread ran into an issue"); // use expect() instead of unwrap_or_else() when you want to panic without needing to format 
+        h.join().expect("Worker thread ran into an issue"); // use expect() instead of unwrap_or_else() when you want to panic without needing to format 
                                                              // Nice thing, unwrap_or_else() can use panics AND recoverable errors; expect() only panics
-        println!("{:?}", output)
        // let pp: String= String::from_utf8_lossy(&output.stdout).lines().last().unwrap_or("").into();
        // println!("{pp}"); <-- to get last line from child
     };
-    hello();
-    println!("All threads are finished!!")
+
+    println!("All threads are finished!")
 
 }
     
