@@ -90,6 +90,12 @@ async fn add_policies(config: &SdkConfig, uuid: String)-> Result<String, Box<dyn
     };
     println!("Your IAM user name is {}", user);
 
+    let ssm_pol_obj: CreatePolicyOutput= client.create_policy()
+                          .policy_name(format!("{}{}", "ssm_policy_", uuid))
+                          .policy_document(policy.replace("{}", "ssm")).send().await?;
+    println!("Created an SSM policy with the name {}", ssm_pol_obj.policy.expect("Could not extract SSM policy info")
+                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));                                                                                                          
+
     let s3_pol_obj: CreatePolicyOutput= client.create_policy()
                           .policy_name(format!("{}{}", "s3_policy_", uuid))
                           .policy_document(policy.replace("{}", "s3")).send().await?;
@@ -199,18 +205,18 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
 
 }
 
-fn launcher(a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider using enum here...
+fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider using enum here...
     if a.ec {
-        let ami: &str= "ami-0bd3fbcdc633a1b1a"; // Amazon Linux 2023 kernel-6.18 AMIA, until June 2029
-        let instance: InstanceType= InstanceType::T3aMedium;
+        let ami: &str= "ami-0eb45f74aa8a20238"; // Amazon Linux 2023 kernel-6.18 AMIA, until June 2029 (Arm64)
+        let instance: InstanceType= InstanceType::R6gLarge; // Use 'X2gdLarge' once you get vCPU access
         create_instance(ami, instance, a, token_vec).unwrap()
     } else {
-        let log_path: PathBuf= if a.num>1 || !a.lg {
+        let log_path: PathBuf= if a.num>1 || a.lg {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         } else {
             PathBuf::new()};
-        let trade_path: PathBuf= env::current_dir().expect("Couldn't extract current dir path")
-                                                  .parent().unwrap().join("subprocesses/executetrades.rs");
+        let trade_path: PathBuf= env::current_exe().expect("Couldn't extract current dir path")
+                                                  .parent().unwrap().join("executetrades");
         println!("{:?}", trade_path);
         // let trade_path: PathBuf= env::current_exe()
         //                 .expect("Couldn't extract current .exe path")
@@ -220,6 +226,7 @@ fn launcher(a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider us
         let tp: String= a.tp.as_ref().unwrap().to_string();
         let child= Command::new(trade_path.as_path()) // '&' is for borrowing
                                     .args([&a.time.to_string(), &sl, &tp])
+                                    .arg(index.to_string())
                                     .arg(log_path)
                                     .args(token_vec)
                                     .arg(ttime.to_string())
@@ -331,12 +338,11 @@ fn main() {
         };
 
     // println!("This is token: {:?}", token_res);
-    let handles: Vec<_>= (1..=args.num)
-                .map(|i: usize| {let args: Arc<Args>= Arc::clone(&args);
-                                 let token_res_clone: Arc<Vec<String>>= Arc::clone(&token_res);
-                                 spawn(move || {println!("Starting worker {i}...");
-                                               launcher(&args, &token_res_clone, tot_time)})}).collect();
-                                               
+    let handles: Vec<_>= (1..=args.num).map(|i: usize| {let args: Arc<Args>= Arc::clone(&args);
+    let token_res_clone: Arc<Vec<String>>= Arc::clone(&token_res);
+    spawn(move || {println!("Starting worker {i}...");
+                   launcher(i, &args, &token_res_clone, tot_time)})}).collect();
+                                         
     for h in handles {
         h.join().expect("Worker thread ran into an issue"); // use expect() instead of unwrap_or_else() when you want to panic without needing to format 
                                                              // Nice thing, unwrap_or_else() can use panics AND recoverable errors; expect() only panics

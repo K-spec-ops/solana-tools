@@ -4,11 +4,14 @@ version= "0.1.0"
 edition= "2024"
 description= "A collection of Rust scripts to automate common operations and processes on the Solana blockchain."
 default-run= "sniper-trader"
-autobins= false
 
 [[bin]]
 name= "sniper-trader"
 path= "src/bin/sniperlauncher.rs"
+
+[[bin]]
+name= "execute-trades"
+path= "src/subprocesses/executetrades.rs"
 
 # Reduce memory usage
 [profile.dev]
@@ -26,8 +29,7 @@ base64 = "0.23.1"
 bs58 = "0.5.1"
 clap= { version = "4.6.6", features = ["derive"] }
 colored = "3.1.1"
-env_logger = "0.11.11"
-log = "0.4.34"
+jiff = "0.2.37"
 num_cpus = "1.17.0"
 rand = "0.10.3"
 simplelog = { version = "0.12.2", features = ["paris"] }
