@@ -34,5 +34,8 @@ num_cpus = "1.17.0"
 rand = "0.10.3"
 simplelog = { version = "0.12.2", features = ["paris"] }
 terminal_hyperlink = "0.1.0"
+time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
 tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["local-time", "time", "std", "ansi"] }
 uuid = { version = "1.26.1", features = ["v4"] }

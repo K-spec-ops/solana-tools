@@ -79,7 +79,7 @@ async fn add_policies(config: &SdkConfig, role: &str, trust_policy: &str)-> Resu
                                              \"Statement\": [{{
                                                     \"Effect\": \"Allow\",
                                                     \"Action\": \"iam:PassRole\",
-                                                    \"Resource\": \"arn:aws:iam::*:role/{}\"}}}}", role);
+                                                    \"Resource\": \"arn:aws:iam::*:role/{}\"}}]}}", role);
     let client: iam_Client= iam_Client::new(config);
     let user: String= match client.get_user().send().await {
         Ok(x)=> x.user.expect("Could not extract user info").user_name,
@@ -233,7 +233,7 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
             PathBuf::new()};
         let trade_path: PathBuf= env::current_exe().expect("Couldn't extract current dir path")
                                                   .parent().unwrap().join("execute-trades");
-        println!("{:?}", trade_path);
+        // println!("{:?}", trade_path);
         // let trade_path: PathBuf= env::current_exe()
         //                 .expect("Couldn't extract current .exe path")
         //                 .parent().expect("Couldn't get parent dir from .exe path")
@@ -241,13 +241,13 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
         let sl: String= a.sl.as_ref().unwrap().to_string();
         let tp: String= a.tp.as_ref().unwrap().to_string();
         let child= Command::new(trade_path.as_path()) // '&' is for borrowing
-                                    .args([&a.time.to_string(), &sl, &tp])
+                                    .args([&a.time.to_string(), &sl, &tp, &a.ec.to_string()])
                                     .arg(index.to_string())
                                     .arg(log_path)
                                     .args(token_vec)
                                     .arg(ttime.to_string())
                                     .stdin(Stdio::piped())
-                                    .stdout(Stdio::piped())
+                                    .stdout(Stdio::inherit())
                                     .spawn()
                                     .expect("Failed to execute child");
         child.wait_with_output().expect("Failed to wait on child");
