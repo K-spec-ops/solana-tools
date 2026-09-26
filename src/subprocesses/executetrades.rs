@@ -4,15 +4,18 @@ use solana_tools::utils::*;
 #[derive(Debug, PartialEq)]
 enum InstanceStats {
     X2gdLarge,
-    T2Medium
+    R6gLarge,
 }
 
 impl InstanceStats {
     fn cost(&self, seconds: f64)-> String { // borrowed since 'cost' will consume the value
         match self {
             InstanceStats::X2gdLarge=> format!("{:.2}", (seconds/ 3600.0)* 0.0167),
-            InstanceStats::T2Medium=> format!("{:.2}", (seconds/ 3600.0)* 0.0464)
+            InstanceStats::R6gLarge=> format!("{:.2}", (seconds/ 3600.0)* 0.1008)
         }
+    
+    // add more stat operations here 
+
     }
 }
 

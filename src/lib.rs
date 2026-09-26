@@ -8,7 +8,8 @@ pub use std::fs::{read, read_to_string, File, OpenOptions};
 pub use std::io::{stdin, BufWriter};
 pub use aws_config::{load_defaults, SdkConfig, BehaviorVersion};
 pub use aws_sdk_iam::Client as iam_Client;
-pub use aws_sdk_iam::operation::{get_user::GetUserOutput, create_policy::CreatePolicyOutput};
+pub use aws_sdk_iam::operation::{get_user::GetUserOutput, create_policy::CreatePolicyOutput, 
+                                    create_role::CreateRoleOutput, attach_role_policy::AttachRolePolicyOutput};
 pub use aws_sdk_s3::primitives::ByteStream;
 pub use aws_sdk_s3::operation::put_object::PutObjectOutput;
 pub use aws_sdk_s3::Client as s3_Client;
@@ -25,6 +26,7 @@ pub use simplelog::{WriteLogger, TermLogger, ConfigBuilder, TerminalMode, ColorC
 pub use bs58::decode;
 pub use uuid::Uuid;
 pub use jiff::Zoned;
+pub use tokio::time::sleep;
 pub use base64::Engine;
 pub use base64::engine::general_purpose::STANDARD;
 pub use std::ffi::os_str::Display;

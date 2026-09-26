@@ -74,48 +74,58 @@ fn count_bytes(s: String)-> Result<String, String> {
     }
 }
 
-async fn add_policies(config: &SdkConfig, uuid: String)-> Result<String, Box<dyn Error>> {
-    let policy: &str= "{
-                \"Version\": \"2012-10-17\",
-                \"Statement\": [{
-                    \"Effect\": \"Allow\",
-                    \"Action\": \"{}:*\",
-                    \"Resource\": \"*\"}]}"; // not secure, but it this should only be ran on a personal account
-
+async fn add_policies(config: &SdkConfig, role: &str, trust_policy: &str)-> Result<(), Box<dyn Error>> {
+    let pass_role_policy: String= format!("{{\"Version\": \"2012-10-17\",
+                                             \"Statement\": [{{
+                                                    \"Effect\": \"Allow\",
+                                                    \"Action\": \"iam:PassRole\",
+                                                    \"Resource\": \"arn:aws:iam::*:role/{}\"}}}}", role);
     let client: iam_Client= iam_Client::new(config);
     let user: String= match client.get_user().send().await {
         Ok(x)=> x.user.expect("Could not extract user info").user_name,
         Err(_)=> panic!("IAM user object did not initialize (Are you using root credentials? / 
                                                         Don't do that. Please create an IAM user for this script)")
     };
-    println!("Your IAM user name is {}", user);
 
-    let ssm_pol_obj: CreatePolicyOutput= client.create_policy()
-                          .policy_name(format!("{}{}", "ssm_policy_", uuid))
-                          .policy_document(policy.replace("{}", "ssm")).send().await?;
-    println!("Created an SSM policy with the name {}", ssm_pol_obj.policy.expect("Could not extract SSM policy info")
-                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));                                                                                                          
+    client.put_user_policy().user_name(user).policy_name("sniper-trader-IAMpassrole")
+                                                   .policy_document(pass_role_policy).send().await?;
+    // IAM PassRole policy needed for AWS services (e.g EC2, SSM) to perform actions on an IAM user's behalf
 
-    let s3_pol_obj: CreatePolicyOutput= client.create_policy()
-                          .policy_name(format!("{}{}", "s3_policy_", uuid))
-                          .policy_document(policy.replace("{}", "s3")).send().await?;
-    println!("Created an S3 policy with the name {}", s3_pol_obj.policy.expect("Could not extract S3 policy info")
-                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
+    if client.get_instance_profile().instance_profile_name(role).send().await.is_ok() {
+        return Ok(()); // reuse roles that have been created from previous runs
+    }
 
-    let ec2_pol_obj: CreatePolicyOutput= client.create_policy()
-                          .policy_name(format!("{}{}", "ec2_policy_", uuid))
-                          .policy_document(policy.replace("{}", "ec2")).send().await?;
-    println!("Created an EC2 policy with the name {}", ec2_pol_obj.policy.expect("Could not extract EC2 policy info")
-                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
+    let role_obj: CreateRoleOutput=client.create_role().role_name(role).assume_role_policy_document(trust_policy)
+                                                                          .send().await?;
+    println!("Created a role with the name {}", role_obj.role.expect("Could not extract role creation info").role_name); // verify
 
-    let iam_pol_obj: CreatePolicyOutput= client.create_policy()
-                          .policy_name(format!("{}{}", "iam_policy_", uuid))
-                          .policy_document(policy.replace("{}", "iam")).send().await?;
-    println!("Created an IAM policy with the name {}", iam_pol_obj.policy.expect("Could not extract IAM policy info")
-                                                                    .policy_name.unwrap_or_else(|| "<unavailable>".to_string()));
-    
-    Ok(user)
-    
+    client.attach_role_policy().role_name(role)
+                               .policy_arn("arn:aws:iam::aws:policy/AmazonS3FullAccess")
+                               .send().await?;
+    println!("Attached the 'AmazonS3FullAccess' policy to the role {}", role);
+
+    client.attach_role_policy().role_name(role)
+                               .policy_arn("arn:aws:iam::aws:policy/IAMFullAccess")
+                               .send().await?;
+    println!("Attached the 'IAMFullAccess' policy to the role {}", role);
+
+    client.attach_role_policy().role_name(role)
+                               .policy_arn("arn:aws:iam::aws:policy/AmazonEC2FullAccess")
+                               .send().await?;
+    println!("Attached the 'AmazonEC2FullAccess' policy to the role {}", role);
+
+    client.attach_role_policy().role_name(role)
+                               .policy_arn("arn:aws:iam::aws:policy/AmazonSSMFullAccess")
+                               .send().await?;
+    println!("Attached the 'AmazonSSMFullAccess' policy to the role {}", role);
+
+    client.create_instance_profile().instance_profile_name(role).send().await?;
+    client.add_role_to_instance_profile().instance_profile_name(role).role_name(role).send().await?;
+
+    print!("Waiting for IAM privileges to propagate...");
+    sleep(Duration::from_secs(10)).await;
+    Ok(())
+
 }
 
 #[tokio::main]
@@ -123,6 +133,12 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
                             a: &Args, token_vec: &Vec<String>)-> Result<(), Box<dyn Error>> { // Use Box<...> when the function can return mutliple error types
     let placement: Placement= Placement::builder().availability_zone("us-east-1a").build();
     let config: SdkConfig= load_defaults(BehaviorVersion::latest()).await;
+    let role: &str= "sniper-trader-EC2";
+    let trust_policy: &str= "{\"Version\": \"2012-10-17\",
+                              \"Statement\": [{
+                                    \"Effect\": \"Allow\",
+                                    \"Principal\": {\"Service\": \"ec2.amazonaws.com\"},
+                                    \"Action\": \"sts:AssumeRole\"}]}";
 
     match sts_Client::new(&config).get_caller_identity().send().await {
         Ok(x)=> {println!("AWS credentials successfully validated!\n   User ID: {}\n   Account ID: {}\n   ARN: {}", 
@@ -131,7 +147,7 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
         Err(_)=> panic!("Could not validate AWS credentials. Please check that they are in your environment")
     }; // println! consumes owned strings
 
-    add_policies(&config, Uuid::new_v4().to_string()).await?;
+    add_policies(&config, role, trust_policy).await?;
 
     let client: Client= Client::new(&config);
     let mut argstr: String= format!("sniper-trader -e {} -t {} -w {}", a.tot, a.time, a.num);
@@ -216,7 +232,7 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
         } else {
             PathBuf::new()};
         let trade_path: PathBuf= env::current_exe().expect("Couldn't extract current dir path")
-                                                  .parent().unwrap().join("executetrades");
+                                                  .parent().unwrap().join("execute-trades");
         println!("{:?}", trade_path);
         // let trade_path: PathBuf= env::current_exe()
         //                 .expect("Couldn't extract current .exe path")
