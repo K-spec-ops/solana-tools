@@ -39,7 +39,6 @@ fn main() {
                                                         .set_max_level(LevelFilter::Info).build();
 
     if !log_path.is_empty() {
-       // let dtime: Vec<&str>= Zoned::now().strftime("%Y:%m:%d").to_string().split(':').collect();
         let dtime: Zoned= Zoned::now();
         WriteLogger::init(LevelFilter::Info, config, 
                           File::create(format!("trader-w{}-{}-{}-{}.log", 
@@ -48,7 +47,7 @@ fn main() {
         TermLogger::init(LevelFilter::Info, config, TerminalMode::Mixed, ColorChoice::Always).unwrap()
     }
     
-    println!("Here is the time: {}\n\
+    info!("Here is the time: {}\n\
               Here is the stop loss: {}\n\
               Here is the take profit: {}\n\
               Here is the log path: {:?}\n\
@@ -56,7 +55,7 @@ fn main() {
               Here is the total time: {}", time, sl, tp, log_path, token_vec, ttime);
     
     let elapsed: f64= now.elapsed().as_secs_f64();
-    println!("This script executed in {} seconds", elapsed);
-    println!("This AWS instance cost ${}", InstanceStats::X2gdLarge.cost(elapsed))
+    info!("This script executed in {} seconds", elapsed);
+    info!("This AWS instance cost ${}", InstanceStats::R6gLarge.cost(elapsed))
 
 }
