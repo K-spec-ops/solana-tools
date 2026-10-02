@@ -3,9 +3,11 @@ use solana_tools::utils::*;
 
 // cargo install --path /home/kabir/Dropbox/sniper-trader, to get 'sniper-trader' to run anywhere by just doing 'sniper-trader'
 // cargo install --path /home/kabir/Dropbox/sniper-trader --force, IF you need to reinstall (new code, etc.)
-// Look at building with Github actions
+// unwrap_or_else has a 0 arg closure on Option<T>, since 'None' doesn't have an error value to pass to it...
 
-fn allowed_decimals(bound: f64)-> impl Fn(&str) -> Result<f64, String>+ Clone {
+const TARGET: &str= "execute-trades"; // could be used as the launcher for several scripts
+
+fn allowed_decimals(bound: f64)-> impl Fn(&str)-> Result<f64, String>+ Clone {
     move |s: &str| {
         let num: f64= s.parse::<f64>().map_err(|_| format!("'{}' isn't a valid float", s))?;
         if 0.0< num && num< bound {
@@ -16,21 +18,22 @@ fn allowed_decimals(bound: f64)-> impl Fn(&str) -> Result<f64, String>+ Clone {
     }
 }
 
-fn allowed_files(s: &str)-> Result<PathBuf, String> {
-    let path: PathBuf= PathBuf::from(s); // could also use the parse() method above but that is unwieldy
-                                         // ::from() is reserved for lossless infallible conversions!
-    if !path.try_exists().unwrap_or_else(|_| false) {
-        return Err("This file does not exist or could not be opened".to_string()) // should use into() IF there is variable assignment
-                                                                                  // only use into() if you can tell the compiler the data type, for inference use to_string()
-    }
-    
-    let ext: Option<&OsStr>= path.extension();
-    if ext== Some(OsStr::new("lst")) {
-        Ok(path)
-    } else {
-        Err(format!("You attached a .{} file, not a .lst file", ext.map(|x| x.to_string_lossy().to_string())
-                                                                .unwrap_or_else(|| "<no extension>".into())))
-    }
+fn allowed_files(cat: &str)-> impl Fn(&str)-> Result<PathBuf, String>+ Clone{
+    move |s: &str| {
+        let path: PathBuf= PathBuf::from(s); // could also use the parse() method above but that is unwieldy
+                                             // ::from() is reserved for lossless infallible conversions!
+        if !path.try_exists().unwrap_or_else(|_| false) {
+            Err("This file does not exist or could not be opened".to_string()) // should use into() IF there is variable assignment                                                                            // only use into() if you can tell the compiler the data type, for inference use to_string()
+        } else {
+            let ext: Option<&OsStr>= path.extension();
+            if ext== Some(OsStr::new(cat)) {
+                Ok(path)
+            } else {
+                Err(format!("You attached a .{} file, not a .{} file", ext.map(|x| x.to_string_lossy().to_string())
+                                                                .unwrap_or_else(|| "<no extension>".into()), cat))
+            }
+        }
+    }   
 }
 
 fn allowed_threads(s: &str)-> Result<usize, String> {
@@ -63,14 +66,14 @@ fn get_user_input()-> String {
     trimnw(&userinp).to_string()
 }
 
-fn count_bytes(s: String)-> Result<String, String> {
+fn count_bytes(s: String, num: usize)-> Result<String, String> {
     let decoded: Vec<u8>= decode(&s).into_vec()
-                        .map_err(|_| format!("I couldn't convert the string ({}) into Base58.", s).to_string())?;
+                        .map_err(|_| "I couldn't convert the string into Base58.".to_string())?;
     
-    if decoded.len()== 32 {
+    if decoded.len()== num {
         Ok(s)
     } else {
-        Err(format!("I could not recognize the address {}.", s))
+        Err("I could not recognize the address.".to_string())
     }
 }
 
@@ -221,7 +224,7 @@ async fn create_instance(imageid: &str, instancetype: InstanceType,
 
 }
 
-fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { // consider using enum here...
+fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, secret_vec: &Arc<String>, ttime: f64)-> () { // consider using enum here...
     if a.ec {
         let ami: &str= "ami-0eb45f74aa8a20238"; // Amazon Linux 2023 kernel-6.18 AMIA, until June 2029 (Arm64)
         let instance: InstanceType= InstanceType::R6gLarge; // Use 'X2gdLarge' once you get vCPU access
@@ -231,8 +234,8 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         } else {
             PathBuf::new()};
-        let trade_path: PathBuf= env::current_exe().expect("Couldn't extract current dir path")
-                                                  .parent().unwrap().join("execute-trades");
+        let trade_path: PathBuf= current_exe().expect("Couldn't extract current dir path")
+                                                  .parent().unwrap().join(TARGET);
         // println!("{:?}", trade_path);
         // let trade_path: PathBuf= env::current_exe()
         //                 .expect("Couldn't extract current .exe path")
@@ -241,9 +244,10 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
         let sl: String= a.sl.as_ref().unwrap().to_string();
         let tp: String= a.tp.as_ref().unwrap().to_string();
         let child= Command::new(trade_path.as_path()) // '&' is for borrowing
-                                    .args([&a.time.to_string(), &sl, &tp, &a.ec.to_string()])
+                                    .args([&a.time.to_string(), &sl, &tp, &a.ec.to_string(), &a.num.to_string()])
                                     .arg(index.to_string())
                                     .arg(log_path)
+                                    .arg(secret_vec.as_ref())
                                     .args(token_vec)
                                     .arg(ttime.to_string())
                                     .stdin(Stdio::piped())
@@ -264,14 +268,15 @@ fn launcher(index: usize, a: &Args, token_vec: &Vec<String>, ttime: f64)-> () { 
                        '-t' flag will define the amount of time between trades. This script also \
                         has the capability to trade user-chosen tokens, either by inputting a single \
                         token address or compiling token addresses in a .lst file.\n\n\
-                        To launch an EC2 instance, you need to add the 'AWS_ACCESS_KEY_ID' \
-                        and 'AWS_SECRET_ACCESS_KEY' environment variables to your .bashrc file. Ctrl + Click \
+                        You will need to add the \"HELIUS_API_KEY\" and \"HELIUS_PROJECT_ID\" environment variables to your .bashrc file. \
+                        To launch an EC2 instance, you also need to add the 'AWS_ACCESS_KEY_ID' \
+                        and 'AWS_SECRET_ACCESS_KEY' environment variables as well. Ctrl + Click \
                         {} for more details.\n\nNOTE: The AWS SDKs are very large crates, and compilation can be killed by the OS \
                         if there isn't enough memory (> than 8 GiB). If you have an older desktop or a laptop, it is recommended to \
                         either compile on another machine, add more swap memory, or build the program \
                         using an EC2 instance, create a \"target/release/\" directory in your cloned repo, then copy the binaries over to said directory.", 
                         "here".hyperlink("https://docs.aws.amazon.com/sdkref/latest/guide/environment-variables.html")),
-          override_usage= "sniper-trader --stop <SL> --profit <TP> --time <TIME> --total <TOT> --file <LST> --workers <NUM> --log --cloud"
+          override_usage= "sniper-trader --stop <SL> --profit <TP> --time <TIME> --total <TOT> --file <LST> --key <KEY> --workers <NUM> --log --cloud"
         )]
 struct Args {
     // f64::MAX
@@ -283,6 +288,10 @@ struct Args {
     /// Number of seconds after which to sell the token
     time: f64,
 
+    #[arg(short= 'k', long= "key", value_parser= allowed_files("json"))]
+    /// Attach a .json file containing a 64-byte secret key. If not specified, the script will prompt for the secret key in base58
+    key: Option<PathBuf>,
+
     /// Stop-loss in decimal percentage
     #[arg(short= 's', long= "stop", requires= "tp", value_parser= allowed_decimals(1.0))]
     sl: Option<f64>,
@@ -292,7 +301,7 @@ struct Args {
     tp: Option<f64>,
 
     /// Attach .lst file of token addresses to trade
-    #[arg(short= 'f', long= "file", value_parser= allowed_files)]
+    #[arg(short= 'f', long= "file", value_parser= allowed_files("lst"))]
     lst: Option<PathBuf>,
     
     /// Number of concurrent workers
@@ -324,11 +333,11 @@ fn main() {
                 "Y"=> {
                     println!("Please enter the token address.");
                     break loop {
-                        match count_bytes(get_user_input()) {
+                        let s: &String= &get_user_input();
+                        match count_bytes(s.to_string(), 32) {
                             Ok(token)=> break Arc::new(Vec::from([token])),
                             Err(msg)=> {
-                                println!("{msg} Solana addresses are fixed to be 32 bytes long. /
-                                         Please try again.");
+                                println!("{} ({}) Solana addresses are fixed to be 32 bytes long. Please try again.", msg, s);
                                 continue
                             }
                         }
@@ -345,19 +354,43 @@ fn main() {
             let path: &PathBuf= args.lst.as_ref().unwrap(); // .as_ref() to reference content of args w/o moving it, which causes a problem in the thread
             for line in read_to_string(&path).
                         unwrap_or_else(|_| panic!("Unable to read {}", path.to_string_lossy())).lines() {
-                                            match count_bytes(trimnw(line).to_string()) {
+                                            match count_bytes(trimnw(line).to_string(), 32) {
                                                 Ok(line)=> result.push(line),
-                                                Err(msg)=> println!("{}: {msg} I'm not going to add it.", "WARNING".yellow())
+                                                Err(msg)=> println!("{}: {} I'm not going to add it ({})", "WARNING".yellow(), msg, line)
                                             }
                                         }
             Arc::new(result)          
+        };
+    
+    let secret_key: Arc<String>= if args.key.is_none() {
+        println!("I see you haven't attached a keypair .json file. Please write your secret key in Base58 below.");
+        loop {
+            match count_bytes(get_user_input(), 64) {
+                Ok(add)=> break Arc::new(add),
+                Err(msg)=> {
+                    println!("{msg} Solana addresses are fixed to be 32 bytes long. Please try again.");
+                    continue
+            }
+        }
+        }} else {
+            let path: &PathBuf= args.key.as_ref().unwrap();
+            let content: String= read_to_string(&path).unwrap_or_else(|_| panic!("Unable to read {}", path.to_string_lossy()));
+            let trimmed: &str= trimnw(&content);
+            let bytes: Vec<u8>= trimmed[1..trimmed.len()- 1].split(',')
+                                                        .map(|line: &str| trimnw(line).parse::<u8>().expect("Keypair has a non-byte value"))
+                                                        .collect();
+            if bytes.len() != 64 {
+                panic!("Expected a 64-byte keypair, got {} bytes from {}", bytes.len(), path.to_string_lossy());
+            }
+            Arc::new(encode(&bytes).into_string())
         };
 
     // println!("This is token: {:?}", token_res);
     let handles: Vec<_>= (1..=args.num).map(|i: usize| {let args: Arc<Args>= Arc::clone(&args);
     let token_res_clone: Arc<Vec<String>>= Arc::clone(&token_res);
+    let secret_key_clone: Arc<String>= Arc::clone(&secret_key);
     spawn(move || {println!("Starting worker {i}...");
-                   launcher(i, &args, &token_res_clone, tot_time)})}).collect();
+                   launcher(i, &args, &token_res_clone, &secret_key_clone, tot_time)})}).collect();
                                          
     for h in handles {
         h.join().expect("Worker thread ran into an issue"); // use expect() instead of unwrap_or_else() when you want to panic without needing to format 
